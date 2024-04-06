@@ -2,9 +2,11 @@ package plugins
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"parsecsv/dto"
 	"parsecsv/orm"
+	"regexp"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -22,22 +24,22 @@ type Hydac struct {
 func NewHydac() *Hydac {
 	return &Hydac{
 		Brand:     "HYDAC",
-		PagesPath: "/var/www/simpleparse/pages/hydac/",
-		CsvPath:   "files/csv/hydac.csv",
-		Domain:    "www.hypneu.de",
-		StartUrl:  "https://www.hypneu.de/shop/hydac-international-gmbh.html",
+		PagesPath: "/var/www/brands/pages/hydac/",
+		CsvPath:   "/var/www/brands/csv/hydac.csv",
+		Domain:    "www.hydac.com",
+		StartUrl:  "https://www.hydac.com/shop/en/hps-2400-1000496612",
 	}
 }
 
 func (o *Hydac) Init() (bool, error) {
-	// CreateDir(PagesPath)
-	// err := CreateDir(o.PagesPath)
-	// if err != nil {
-	// 	log.Println(err)
-	// 	return false, err
-	// }
+	CreateDir(o.PagesPath)
+	err := CreateDir(o.PagesPath)
+	if err != nil {
+		log.Println(err)
+		return false, err
+	}
 
-	err := CreateCsv(o.CsvPath)
+	err = CreateCsv(o.CsvPath)
 	if err != nil {
 		log.Println(err)
 		return false, err
@@ -52,7 +54,7 @@ func (o *Hydac) OnLink(e *colly.HTMLElement) (bool, error) {
 	// convert relative url to absolute
 	url := e.Request.AbsoluteURL(link)
 
-	if strings.Contains(url, "shop/hydac-international-gmbh") {
+	if strings.Contains(url, "shop/en") {
 		return true, nil
 	}
 	return false, nil
@@ -63,7 +65,7 @@ func (o *Hydac) OnPage(e *colly.Response) (bool, error) {
 	url := e.Request.URL.String()
 
 	// if HTML contains div with class "product-page" then this is the page
-	if !bytes.Contains(e.Body, []byte(`class="product-view"`)) {
+	if !regexp.MustCompile(`\/shop\/en\/\d+$`).MatchString(url) {
 		// just skip this url, no errors triggered
 		return false, nil
 	}
@@ -73,20 +75,20 @@ func (o *Hydac) OnPage(e *colly.Response) (bool, error) {
 		return true, err
 	}
 
-	err = orm.WriteCsv(o.CsvPath, product)
+	err = orm.WritePCsv(o.CsvPath, product)
 	if err != nil {
 		return true, err
 	}
 
-	// err = orm.SavePage(o.PagesPath+product.File, string(e.Body))
-	// if err != nil {
-	// 	return true, err
-	// }
+	err = orm.SavePage(o.PagesPath+product.File, string(e.Body))
+	if err != nil {
+		return true, err
+	}
 
 	return true, nil
 }
 
-func (o *Hydac) ParsePage(html *bytes.Buffer, source string) (*dto.Product, error) {
+func (o *Hydac) ParsePage(html *bytes.Buffer, source string) (*dto.PCard, error) {
 
 	// бренд, категория, модель, название, артикул, цена, источник, файл
 
@@ -95,49 +97,69 @@ func (o *Hydac) ParsePage(html *bytes.Buffer, source string) (*dto.Product, erro
 		return nil, err
 	}
 
-	occ := []string{
-		"\n",
-		"\t",
-		"Description:",
-		"Artikelnummer:",
-		"Beschreibung:",
-		"Datasheet",
-		"PDF",
-		"Product code:",
-		"€",
-	}
+	// parse model from h1.page-title span.base attribute "data-product-name"
+	model := doc.Find("h1.page-title span.base").Text()
 
-	// parse model from div.box-description text (whithout strong text) trim space
-	model := strings.TrimSpace(doc.Find("div.box-description").Text())
+	// parse sku
+	sku := doc.Find(".sku .value").Text()
 
-	model = ReplaceString(model, occ)
+	// parse category
+	// Find category from div.breadcrumbs ul (li a text +|+ li a text+|+li a text)
+	category := ""
+	doc.Find(".breadcrumbs ul li a").Each(func(i int, s *goquery.Selection) {
 
-	// // parse sku from div.product-shop first p text trim space
-	sku := strings.TrimSpace(doc.Find("div.product-shop p").Eq(0).Text())
-	sku = ReplaceString(sku, occ)
+		category += "|" + strings.TrimSpace(s.Text())
+	})
+	category = strings.Replace(category, "|Home|", "", -1)
 
-
+	// parse img from div.product first img.fotorama__img (attribute "data-src" value)
+	img := doc.Find("div.product img.lazyload").First().AttrOr("data-src", "")
 
 	// Find name from div.ajax_breadcrumbs h1 text trim space
 	name := ""
 
 	// Find price from div.price text trim ₽ trim space
-	price := strings.TrimSpace(doc.Find("div.price-box span.price").Text())
-	price = ReplaceString(price, occ)
+	price := ""
+
+	// parse properties
+	props := make(map[string]string)
+	doc.Find(".additional-attributes-wrapper table tbody tr").Each(func(i int, s *goquery.Selection) {
+		key := strings.TrimSpace(s.Find(".label").Text())
+		value := s.Find(".data").Text()
+		props[key] = value
+	})
+
+	properties := ""
+
+	// if properties is not empty then convert map[string]string
+	if len(props) > 0 {
+		// properties = props to json
+		propertiesJSON, err := json.Marshal(props)
+		if err != nil {
+			return nil, err
+		}
+		properties = string(propertiesJSON)
+	}
+
+	description := ""
 
 	// Find currency from div.product-price-count meta itemprop="priceCurrency" (attribute "content" value)
 	currency := "EUR"
 
 	//fmt.Println(sku)
 
-	return &dto.Product{
-		Brand:    o.Brand,
-		Model:    model,
-		Name:     name,
-		SKU:      sku,
-		Price:    price,
-		Currency: currency,
-		Source:   source,
-		File:     Hash(sku) + ".html",
+	return &dto.PCard{
+		Brand:       o.Brand,
+		Category:    category,
+		Model:       model,
+		Name:        name,
+		SKU:         sku,
+		Price:       price,
+		Currency:    currency,
+		Source:      source,
+		Img:         img,
+		Properties:  properties,
+		Description: description,
+		File:        Hash(sku) + ".html",
 	}, nil
 }

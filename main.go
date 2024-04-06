@@ -24,7 +24,7 @@ import (
 // }
 
 func main() {
-	plugin := plugins.NewSiemens()
+	plugin := plugins.NewSMC()
 
 	_, err := plugin.Init()
 	if err != nil {
@@ -55,7 +55,7 @@ func XlsxRead(p *plugins.Lenze) {
 	p.XlsxRead()
 }
 
-func Crawling(p *plugins.Siemens) {
+func Crawling(p *plugins.SMC) {
 
 	// Instantiate default collector
 	c := colly.NewCollector(
